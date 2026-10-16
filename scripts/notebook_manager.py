@@ -6,12 +6,22 @@ Based on the MCP server implementation
 """
 
 import json
+import re
+import sys
 import argparse
-import uuid
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config import LIBRARY_FILE, normalize_notebook_url
+
+
+def slugify(name: str) -> str:
+    """Shell-safe ID: lowercase alphanumerics separated by single hyphens"""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "notebook"
 
 
 class NotebookLibrary:
@@ -19,12 +29,8 @@ class NotebookLibrary:
 
     def __init__(self):
         """Initialize the notebook library"""
-        # Store data within the skill directory
-        skill_dir = Path(__file__).parent.parent
-        self.data_dir = skill_dir / "data"
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-
-        self.library_file = self.data_dir / "library.json"
+        self.library_file = LIBRARY_FILE
+        self.library_file.parent.mkdir(parents=True, exist_ok=True)
         self.notebooks: Dict[str, Dict[str, Any]] = {}
         self.active_notebook_id: Optional[str] = None
 
@@ -39,12 +45,38 @@ class NotebookLibrary:
                     data = json.load(f)
                     self.notebooks = data.get('notebooks', {})
                     self.active_notebook_id = data.get('active_notebook_id')
-                    print(f"📚 Loaded library with {len(self.notebooks)} notebooks")
+                self._migrate()
             except Exception as e:
                 print(f"⚠️ Error loading library: {e}")
                 self.notebooks = {}
                 self.active_notebook_id = None
         else:
+            self._save_library()
+
+    def _migrate(self):
+        """Re-key legacy IDs (which could contain ':' or '&') and canonicalize URLs"""
+        changed = False
+        migrated = {}
+        for old_id, notebook in self.notebooks.items():
+            new_id = slugify(old_id)
+            if new_id in migrated:
+                new_id = old_id  # keep legacy ID rather than collide
+            if new_id != old_id:
+                notebook['legacy_id'] = old_id
+                if self.active_notebook_id == old_id:
+                    self.active_notebook_id = new_id
+                changed = True
+            notebook['id'] = new_id
+            try:
+                url = normalize_notebook_url(notebook['url'])
+                if url != notebook['url']:
+                    notebook['url'] = url
+                    changed = True
+            except ValueError:
+                pass
+            migrated[new_id] = notebook
+        self.notebooks = migrated
+        if changed:
             self._save_library()
 
     def _save_library(self):
@@ -85,8 +117,12 @@ class NotebookLibrary:
         Returns:
             The created notebook object
         """
-        # Generate ID from name
-        notebook_id = name.lower().replace(' ', '-').replace('_', '-')
+        url = normalize_notebook_url(url)
+        notebook_id = slugify(name)
+
+        for existing in self.notebooks.values():
+            if existing['url'] == url:
+                raise ValueError(f"URL already in library as '{existing['id']}'")
 
         # Check for duplicates
         if notebook_id in self.notebooks:
@@ -130,6 +166,7 @@ class NotebookLibrary:
         Returns:
             True if removed, False if not found
         """
+        notebook_id = self.resolve_id(notebook_id) or notebook_id
         if notebook_id in self.notebooks:
             del self.notebooks[notebook_id]
 
@@ -187,7 +224,7 @@ class NotebookLibrary:
         if tags is not None:
             notebook['tags'] = tags
         if url is not None:
-            notebook['url'] = url
+            notebook['url'] = normalize_notebook_url(url)
 
         notebook['updated_at'] = datetime.now().isoformat()
 
@@ -195,9 +232,22 @@ class NotebookLibrary:
         print(f"✅ Updated notebook: {notebook['name']}")
         return notebook
 
+    def resolve_id(self, notebook_id: str) -> Optional[str]:
+        """Accept current IDs, legacy IDs, or names typed loosely"""
+        if notebook_id in self.notebooks:
+            return notebook_id
+        slug = slugify(notebook_id)
+        if slug in self.notebooks:
+            return slug
+        for nid, notebook in self.notebooks.items():
+            if notebook.get('legacy_id') == notebook_id:
+                return nid
+        return None
+
     def get_notebook(self, notebook_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific notebook by ID"""
-        return self.notebooks.get(notebook_id)
+        nid = self.resolve_id(notebook_id)
+        return self.notebooks.get(nid) if nid else None
 
     def list_notebooks(self) -> List[Dict[str, Any]]:
         """List all notebooks in the library"""
@@ -241,8 +291,9 @@ class NotebookLibrary:
         Returns:
             The activated notebook
         """
-        if notebook_id not in self.notebooks:
-            raise ValueError(f"Notebook not found: {notebook_id}")
+        notebook_id = self.resolve_id(notebook_id)
+        if notebook_id is None:
+            raise ValueError("Notebook not found")
 
         self.active_notebook_id = notebook_id
         self._save_library()
@@ -349,14 +400,18 @@ def main():
         use_cases = [u.strip() for u in args.use_cases.split(',')] if args.use_cases else None
         tags = [t.strip() for t in args.tags.split(',')] if args.tags else None
 
-        notebook = library.add_notebook(
-            url=args.url,
-            name=args.name,
-            description=args.description,
-            topics=topics,
-            use_cases=use_cases,
-            tags=tags
-        )
+        try:
+            notebook = library.add_notebook(
+                url=args.url,
+                name=args.name,
+                description=args.description,
+                topics=topics,
+                use_cases=use_cases,
+                tags=tags
+            )
+        except ValueError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
         print(json.dumps(notebook, indent=2))
 
     elif args.command == 'list':
@@ -383,7 +438,11 @@ def main():
             print(f"🔍 No notebooks found for: {args.query}")
 
     elif args.command == 'activate':
-        notebook = library.select_notebook(args.id)
+        try:
+            notebook = library.select_notebook(args.id)
+        except ValueError as e:
+            print(f"❌ {e}: {args.id}")
+            sys.exit(1)
         print(f"Now using: {notebook['name']}")
 
     elif args.command == 'remove':

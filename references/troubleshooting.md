@@ -1,376 +1,152 @@
-# NotebookLM Skill Troubleshooting Guide
+# NotebookLM Skill Troubleshooting
 
-## Quick Fix Table
+All commands use the wrapper: `python3 ${CLAUDE_SKILL_DIR}/scripts/run.py <script> [args]` (abbreviated `run.py` below).
 
-| Error | Solution |
-|-------|----------|
-| ModuleNotFoundError | Use `python scripts/run.py [script].py` |
-| Authentication failed | Browser must be visible for setup |
-| Browser crash | `python scripts/run.py cleanup_manager.py --preserve-library` |
-| Rate limit hit | Wait 1 hour or switch accounts |
-| Notebook not found | `python scripts/run.py notebook_manager.py list` |
-| Script not working | Always use run.py wrapper |
+## Quick fixes
 
-## Critical: Always Use run.py
+| Symptom | Fix |
+|---------|-----|
+| Exit 3, "Environment not ready" | Ask the user, then `run.py setup_environment.py` |
+| Exit 2, "Not authenticated" | Tell the user a window will open, then `run.py auth_manager.py reauth` |
+| "Could not find the chat input" | UI drift or overlay; check `data/debug/`, rerun with `--show-browser` |
+| "No answer within 180s" | Long answer or UI drift; check `data/debug/`, raise `QUERY_TIMEOUT_SECONDS` |
+| "Notebook '...' not found" | `run.py notebook_manager.py list` |
+| "Not a notebook URL" | Use `https://notebook.google.com/notebook/<id>` (old host also accepted) |
+| "browser may not be secure" on login | See [Google blocks the login](#google-blocks-the-login) |
+| Chrome won't start / profile in use | See [Browser won't start](#browser-wont-start-or-the-profile-is-in-use) |
 
-Most issues are solved by using the run.py wrapper:
+## Environment (exit 3)
+
+`run.py` never installs anything. It exits 3 when:
+
+- `.venv` does not exist,
+- `.venv` is broken or lacks `patchright` (e.g. the Python it was built from was removed or upgraded),
+- `requirements.txt` changed since setup (hash in `.venv/.requirements.sha256` differs).
+
+Fix, after asking the user (it pip-installs into the skill's own `.venv` only):
 
 ```bash
-# ✅ CORRECT - Always:
-python scripts/run.py auth_manager.py status
-python scripts/run.py ask_question.py --question "..."
-
-# ❌ WRONG - Never:
-python scripts/auth_manager.py status  # ModuleNotFoundError!
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py --check     # what's wrong
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py             # install/update
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py --recreate  # base Python gone
 ```
 
-## Common Issues and Solutions
+Needs Python 3.10+ for `python3`. "Google Chrome not found" during setup means Chrome is not in its standard location; setup then tries `patchright install chrome`, which may ask for sudo. Installing Chrome from https://www.google.com/chrome/ is the alternative.
 
-### Authentication Issues
+Running a script without `run.py` (`python3 scripts/ask_question.py`) fails with `ModuleNotFoundError: No module named 'patchright'`.
 
-#### Not authenticated error
-```
-Error: Not authenticated. Please run auth setup first.
-```
+## Authentication
 
-**Solution:**
+### Not authenticated (exit 2)
+
+Raised when `state.json` has no unexpired Google session cookie, or the notebook page redirects to `accounts.google.com`.
+
 ```bash
-# Check status
-python scripts/run.py auth_manager.py status
-
-# Setup authentication (browser MUST be visible!)
-python scripts/run.py auth_manager.py setup
-# User must manually log in to Google
-
-# If setup fails, try re-authentication
-python scripts/run.py auth_manager.py reauth
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py status    # offline cookie check
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py validate  # live headless check
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py reauth    # visible window, user signs in
 ```
 
-#### Authentication expires frequently
-**Solution:**
+`status` can say "Yes" while Google has already revoked the session; `validate` is the reliable check. Every successful query and `validate` re-save the rotated cookies, so regular use keeps the session alive.
+
+### Login times out
+
+`setup` waits 10 minutes for the browser to land back on `notebook.google.com`. Give more time with `auth_manager.py setup --timeout 20`. If the user signed in but setup still fails with "no Google session cookie was set", run `reauth`.
+
+### Google blocks the login
+
+"This browser or app may not be secure" is Google's automation detection.
+
+1. Run `reauth` (fresh profile) and let the user sign in by hand in the visible window.
+2. Check Chrome is the real Google Chrome and up to date: `setup_environment.py --check`.
+3. Do not add a custom user agent or launch flags in `scripts/config.py`. Earlier versions forced a truncated Windows user agent and `--disable-blink-features`, which triggered this block; the current setup uses Patchright's defaults.
+4. If it persists, try a different (dedicated) Google account or network.
+
+### Switching accounts
+
+`auth_manager.py reauth` clears the profile and opens a fresh login.
+
+## Queries
+
+### "Could not find the chat input"
+
+The script waits 20 s for `textarea.query-box-input` (fallbacks: `aria-label="Query box"` and older labels). Causes:
+
+- **UI change.** Open `data/debug/<timestamp>-no-input.png` and `.html`, find the new textarea, and update `QUERY_INPUT_SELECTORS` in `scripts/config.py`.
+- **Wrong page.** The URL is not a notebook, the notebook was deleted, or the signed-in account has no access. The screenshot shows which.
+- **Slow load.** Retry once.
+
+### "No answer within N s"
+
+- A long answer: raise `QUERY_TIMEOUT_SECONDS` in `.env` (default 180).
+- The answer structure changed: each Q&A should be a `.chat-message-pair` with `.from-user-container` and `.to-user-container .message-text-content`; completion is signalled by the copy button (`.xap-copy-to-clipboard`). Compare against `data/debug/<timestamp>-no-answer.html` and update `scripts/config.py`.
+- The question was not submitted (still in the input box in the screenshot): an overlay or focus problem. Rerun with `--show-browser`.
+
+### Overlay dialogs
+
+Promo / "what's new" dialogs (`mat-dialog-container`) are dismissed before typing. If a new dialog variant is not closed, add its close button to `DIALOG_CLOSE_SELECTORS` in `scripts/config.py`.
+
+### Answer contains "Thoughts" text or odd citations
+
+Answers start with a collapsible "Thoughts" panel (`thinking-chain-view`) that is removed, and citation buttons (`.citation-marker`) become `[n]`. If either shows up raw, the selectors `THOUGHTS_SELECTOR` / `CITATION_SELECTOR` in `scripts/config.py` need updating.
+
+### Wrong or old answer
+
+The skill matches the latest message pair's question to the one it asked, so older chat history should never be returned. If it is, the user-bubble selector (`USER_TEXT_SELECTOR`) has likely drifted.
+
+### Notebook chat history is filling up
+
+Every question the skill asks is saved in the notebook's chat history (visible in the web UI). The skill does not delete it; clear it in the web UI if needed.
+
+### Quota reached
+
+Daily chat limits depend on the user's Google plan. Wait for the reset or use another account with `reauth`. Don't loop retries.
+
+## Browser won't start or the profile is in use
+
+All launches share `data/browser_state/browser_profile/`, and a Chrome profile can only be used by one process. Concurrent queries, or a Chrome left running after a crash, cause launch errors.
+
 ```bash
-# Clear old authentication
-python scripts/run.py cleanup_manager.py --preserve-library
-
-# Fresh authentication setup
-python scripts/run.py auth_manager.py setup --timeout 15
-
-# Use persistent browser profile
-export PERSIST_AUTH=true
+# Find leftover Chrome processes using the skill profile
+pgrep -fl "notebooklm/data/browser_state/browser_profile"
+pkill -f "notebooklm/data/browser_state/browser_profile"
 ```
 
-#### Google blocks automated login
-**Solution:**
-1. Use dedicated Google account for automation
-2. Enable "Less secure app access" if available
-3. ALWAYS use visible browser:
+If the profile is corrupted:
+
 ```bash
-python scripts/run.py auth_manager.py setup
-# Browser MUST be visible - user logs in manually
-# NO headless parameter exists - use --show-browser for debugging
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py cleanup_manager.py --confirm --preserve-library --force
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py setup
 ```
 
-### Browser Issues
+`--confirm` without `--force` prompts for `yes` on stdin.
 
-#### Browser crashes or hangs
-```
-TimeoutError: Waiting for selector failed
-```
+## Library
 
-**Solution:**
+| Problem | Fix |
+|---------|-----|
+| ID not found | `notebook_manager.py list`. IDs are slugs (`a-z0-9-`); names and legacy IDs also resolve. |
+| "URL already in library as '<id>'" | The notebook is already saved under that ID; use it. |
+| "Notebook with ID '...' already exists" | Pick a different `--name`. |
+| Old IDs with `:` or `&` | Migrated automatically on load; the old ID still works. |
+| Corrupted `library.json` | Back it up, delete it, re-add notebooks. |
+
+## Debugging
+
 ```bash
-# Kill hanging processes
-pkill -f chromium
-pkill -f chrome
-
-# Clean browser state
-python scripts/run.py cleanup_manager.py --confirm --preserve-library
-
-# Re-authenticate
-python scripts/run.py auth_manager.py reauth
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py ask_question.py --question "test" --show-browser
+ls -t ${CLAUDE_SKILL_DIR}/data/debug/ | head
 ```
 
-#### Browser not found error
-**Solution:**
+Set `HEADLESS=false` in `${CLAUDE_SKILL_DIR}/.env` to see the browser on every call.
+
+Useful information for a bug report: `setup_environment.py --check`, `auth_manager.py status`, the command and its full output, and the latest `data/debug/` screenshot (the HTML dump may contain notebook content; review before sharing). Never share `data/browser_state/`.
+
+## Full reset
+
 ```bash
-# Install Chromium via run.py (automatic)
-python scripts/run.py auth_manager.py status
-# run.py will install Chromium automatically
-
-# Or manual install if needed
-cd ~/.claude/skills/notebooklm
-source .venv/bin/activate
-python -m patchright install chromium
+cp ${CLAUDE_SKILL_DIR}/data/library.json ~/library.backup.json          # optional backup
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py cleanup_manager.py --confirm --preserve-library --force
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py --recreate   # ask the user first
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py setup
 ```
-
-### Rate Limiting
-
-#### Rate limit exceeded (50 queries/day)
-**Solutions:**
-
-**Option 1: Wait**
-```bash
-# Check when limit resets (usually midnight PST)
-date -d "tomorrow 00:00 PST"
-```
-
-**Option 2: Switch accounts**
-```bash
-# Clear current auth
-python scripts/run.py auth_manager.py clear
-
-# Login with different account
-python scripts/run.py auth_manager.py setup
-```
-
-**Option 3: Rotate accounts**
-```python
-# Use multiple accounts
-accounts = ["account1", "account2"]
-for account in accounts:
-    # Switch account on rate limit
-    subprocess.run(["python", "scripts/run.py", "auth_manager.py", "reauth"])
-```
-
-### Notebook Access Issues
-
-#### Notebook not found
-**Solution:**
-```bash
-# List all notebooks
-python scripts/run.py notebook_manager.py list
-
-# Search for notebook
-python scripts/run.py notebook_manager.py search --query "keyword"
-
-# Add notebook if missing
-python scripts/run.py notebook_manager.py add \
-  --url "https://notebooklm.google.com/..." \
-  --name "Name" \
-  --topics "topics"
-```
-
-#### Access denied to notebook
-**Solution:**
-1. Check if notebook is still shared publicly
-2. Re-add notebook with updated URL
-3. Verify correct Google account is used
-
-#### Wrong notebook being used
-**Solution:**
-```bash
-# Check active notebook
-python scripts/run.py notebook_manager.py list | grep "active"
-
-# Activate correct notebook
-python scripts/run.py notebook_manager.py activate --id correct-id
-```
-
-### Virtual Environment Issues
-
-#### ModuleNotFoundError
-```
-ModuleNotFoundError: No module named 'patchright'
-```
-
-**Solution:**
-```bash
-# ALWAYS use run.py - it handles venv automatically!
-python scripts/run.py [any_script].py
-
-# run.py will:
-# 1. Create .venv if missing
-# 2. Install dependencies
-# 3. Run the script
-```
-
-#### Wrong Python version
-**Solution:**
-```bash
-# Check Python version (needs 3.8+)
-python --version
-
-# If wrong version, specify correct Python
-python3.8 scripts/run.py auth_manager.py status
-```
-
-### Network Issues
-
-#### Connection timeouts
-**Solution:**
-```bash
-# Increase timeout
-export TIMEOUT_SECONDS=60
-
-# Check connectivity
-ping notebooklm.google.com
-
-# Use proxy if needed
-export HTTP_PROXY=http://proxy:port
-export HTTPS_PROXY=http://proxy:port
-```
-
-### Data Issues
-
-#### Corrupted notebook library
-```
-JSON decode error when listing notebooks
-```
-
-**Solution:**
-```bash
-# Backup current library
-cp ~/.claude/skills/notebooklm/data/library.json library.backup.json
-
-# Reset library
-rm ~/.claude/skills/notebooklm/data/library.json
-
-# Re-add notebooks
-python scripts/run.py notebook_manager.py add --url ... --name ...
-```
-
-#### Disk space full
-**Solution:**
-```bash
-# Check disk usage
-df -h ~/.claude/skills/notebooklm/data/
-
-# Clean up
-python scripts/run.py cleanup_manager.py --confirm --preserve-library
-```
-
-## Debugging Techniques
-
-### Enable verbose logging
-```bash
-export DEBUG=true
-export LOG_LEVEL=DEBUG
-python scripts/run.py ask_question.py --question "Test" --show-browser
-```
-
-### Test individual components
-```bash
-# Test authentication
-python scripts/run.py auth_manager.py status
-
-# Test notebook access
-python scripts/run.py notebook_manager.py list
-
-# Test browser launch
-python scripts/run.py ask_question.py --question "test" --show-browser
-```
-
-### Save screenshots on error
-Add to scripts for debugging:
-```python
-try:
-    # Your code
-except Exception as e:
-    page.screenshot(path=f"error_{timestamp}.png")
-    raise e
-```
-
-## Recovery Procedures
-
-### Complete reset
-```bash
-#!/bin/bash
-# Kill processes
-pkill -f chromium
-
-# Backup library if exists
-if [ -f ~/.claude/skills/notebooklm/data/library.json ]; then
-    cp ~/.claude/skills/notebooklm/data/library.json ~/library.backup.json
-fi
-
-# Clean everything
-cd ~/.claude/skills/notebooklm
-python scripts/run.py cleanup_manager.py --confirm --force
-
-# Remove venv
-rm -rf .venv
-
-# Reinstall (run.py will handle this)
-python scripts/run.py auth_manager.py setup
-
-# Restore library if backup exists
-if [ -f ~/library.backup.json ]; then
-    mkdir -p ~/.claude/skills/notebooklm/data/
-    cp ~/library.backup.json ~/.claude/skills/notebooklm/data/library.json
-fi
-```
-
-### Partial recovery (keep data)
-```bash
-# Keep auth and library, fix execution
-cd ~/.claude/skills/notebooklm
-rm -rf .venv
-
-# run.py will recreate venv automatically
-python scripts/run.py auth_manager.py status
-```
-
-## Error Messages Reference
-
-### Authentication Errors
-| Error | Cause | Solution |
-|-------|-------|----------|
-| Not authenticated | No valid auth | `run.py auth_manager.py setup` |
-| Authentication expired | Session old | `run.py auth_manager.py reauth` |
-| Invalid credentials | Wrong account | Check Google account |
-| 2FA required | Security challenge | Complete in visible browser |
-
-### Browser Errors
-| Error | Cause | Solution |
-|-------|-------|----------|
-| Browser not found | Chromium missing | Use run.py (auto-installs) |
-| Connection refused | Browser crashed | Kill processes, restart |
-| Timeout waiting | Page slow | Increase timeout |
-| Context closed | Browser terminated | Check logs for crashes |
-
-### Notebook Errors
-| Error | Cause | Solution |
-|-------|-------|----------|
-| Notebook not found | Invalid ID | `run.py notebook_manager.py list` |
-| Access denied | Not shared | Re-share in NotebookLM |
-| Invalid URL | Wrong format | Use full NotebookLM URL |
-| No active notebook | None selected | `run.py notebook_manager.py activate` |
-
-## Prevention Tips
-
-1. **Always use run.py** - Prevents 90% of issues
-2. **Regular maintenance** - Clear browser state weekly
-3. **Monitor queries** - Track daily count to avoid limits
-4. **Backup library** - Export notebook list regularly
-5. **Use dedicated account** - Separate Google account for automation
-
-## Getting Help
-
-### Diagnostic information to collect
-```bash
-# System info
-python --version
-cd ~/.claude/skills/notebooklm
-ls -la
-
-# Skill status
-python scripts/run.py auth_manager.py status
-python scripts/run.py notebook_manager.py list | head -5
-
-# Check data directory
-ls -la ~/.claude/skills/notebooklm/data/
-```
-
-### Common questions
-
-**Q: Why doesn't this work in Claude web UI?**
-A: Web UI has no network access. Use local Claude Code.
-
-**Q: Can I use multiple Google accounts?**
-A: Yes, use `run.py auth_manager.py reauth` to switch.
-
-**Q: How to increase rate limit?**
-A: Use multiple accounts or upgrade to Google Workspace.
-
-**Q: Is this safe for my Google account?**
-A: Use dedicated account for automation. Only accesses NotebookLM.

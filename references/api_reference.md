@@ -1,309 +1,219 @@
 # NotebookLM Skill API Reference
 
-Complete API documentation for all NotebookLM skill modules.
+Command and module reference. NotebookLM is now called Gemini Notebook and lives at `https://notebook.google.com`; `notebooklm.google.com` URLs redirect there and are accepted by every command.
 
-## Important: Always Use run.py Wrapper
+## Running scripts
 
-**All commands must use the `run.py` wrapper to ensure proper environment:**
-
-```bash
-# ✅ CORRECT:
-python scripts/run.py [script_name].py [arguments]
-
-# ❌ WRONG:
-python scripts/[script_name].py [arguments]  # Will fail without venv!
-```
-
-## Core Scripts
-
-### ask_question.py
-Query NotebookLM with automated browser interaction.
+Always go through the wrapper with its absolute path. It works from any working directory:
 
 ```bash
-# Basic usage
-python scripts/run.py ask_question.py --question "Your question"
-
-# With specific notebook
-python scripts/run.py ask_question.py --question "..." --notebook-id notebook-id
-
-# With direct URL
-python scripts/run.py ask_question.py --question "..." --notebook-url "https://..."
-
-# Show browser (debugging)
-python scripts/run.py ask_question.py --question "..." --show-browser
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py <script>.py [args]
 ```
 
-**Parameters:**
-- `--question` (required): Question to ask
-- `--notebook-id`: Use notebook from library
-- `--notebook-url`: Use URL directly
-- `--show-browser`: Make browser visible
+`run.py` runs the script with the skill's own `.venv` interpreter. It never creates the venv or installs anything. Before running it checks that:
 
-**Returns:** Answer text with follow-up prompt appended
+1. `.venv` exists,
+2. `.venv` can `import patchright` (the base interpreter may have been removed or upgraded),
+3. `.venv/.requirements.sha256` matches the SHA-256 of `requirements.txt`.
 
-### notebook_manager.py
-Manage notebook library with CRUD operations.
+If any check fails it prints the problem and exits **3**. Ask the user before running `setup_environment.py`.
+
+Running a script directly with the system Python fails because `patchright` is only installed in `.venv`.
+
+## Exit codes
+
+| Code | Source | Meaning | Action |
+|------|--------|---------|--------|
+| 0 | all | Success | |
+| 1 | all | Failure (bad args, notebook not found, no answer, error) | Read the output; see troubleshooting |
+| 2 | `ask_question.py` | Not authenticated / session expired | Tell the user a browser will open, run `auth_manager.py reauth`, retry once |
+| 3 | `run.py` | `.venv` missing, broken or out of date | Ask the user, then run `setup_environment.py` |
+
+## ask_question.py
+
+Ask one question in a fresh browser session.
 
 ```bash
-# Smart Add (discover content first)
-python scripts/run.py ask_question.py --question "What is the content of this notebook? What topics are covered? Provide a complete overview briefly and concisely" --notebook-url "[URL]"
-# Then add with discovered info
-python scripts/run.py notebook_manager.py add \
-  --url "https://notebooklm.google.com/notebook/..." \
-  --name "Name" \
-  --description "Description" \
-  --topics "topic1,topic2"
-
-# Direct add (when you know the content)
-python scripts/run.py notebook_manager.py add \
-  --url "https://notebooklm.google.com/notebook/..." \
-  --name "Name" \
-  --description "What it contains" \
-  --topics "topic1,topic2"
-
-# List notebooks
-python scripts/run.py notebook_manager.py list
-
-# Search notebooks
-python scripts/run.py notebook_manager.py search --query "keyword"
-
-# Activate notebook
-python scripts/run.py notebook_manager.py activate --id notebook-id
-
-# Remove notebook
-python scripts/run.py notebook_manager.py remove --id notebook-id
-
-# Show statistics
-python scripts/run.py notebook_manager.py stats
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py ask_question.py --question "..."
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py ask_question.py --question "..." --notebook-id ID
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py ask_question.py --question "..." --notebook-url URL
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py ask_question.py --question "..." --show-browser
 ```
 
-**Commands:**
-- `add`: Add notebook (requires --url, --name, --topics)
-- `list`: Show all notebooks
-- `search`: Find notebooks by keyword
-- `activate`: Set default notebook
-- `remove`: Delete from library
-- `stats`: Display library statistics
+| Option | Description |
+|--------|-------------|
+| `--question` (required) | Question text. Newlines are joined with spaces (Enter would submit early). |
+| `--notebook-id` | Library ID (current slug, legacy ID or a loosely typed name). |
+| `--notebook-url` | Notebook URL, either host. Normalized to `https://notebook.google.com/notebook/<id>`. |
+| `--show-browser` | Visible browser for this call. |
 
-### auth_manager.py
-Handle Google authentication and browser state.
+Notebook resolution order: `--notebook-url`, then `--notebook-id`, then `DEFAULT_NOTEBOOK_ID` from `.env`, then the active notebook. With none of these it lists the library and exits 1. On success the notebook's `use_count` and `last_used` are updated (also for `--notebook-url` when the URL is in the library).
+
+**Output** (stdout, after progress lines):
+
+```
+============================================================
+Question: <question>
+============================================================
+
+<answer text with [n] citations>
+
+[Note to assistant: if this answer leaves a gap in the user's request, ask one self-contained follow-up that restates the needed context; otherwise answer the user.]
+
+============================================================
+```
+
+**Answer extraction:** each Q&A in the chat is a `.chat-message-pair` with a `.from-user-container` (question) and `.to-user-container` (answer). The script waits until the newest pair's user bubble matches the question it asked, then until the text stops changing (a copy button appears when an answer is finished). From the answer it removes the collapsible "Thoughts" panel (`thinking-chain-view`), turns citation buttons into `[n]`, prefixes superscripts with `^` and subscripts with `_`, and keeps list and paragraph breaks. Promo dialogs (`mat-dialog-container`) covering the chat are dismissed first. The answer timeout is `QUERY_TIMEOUT_SECONDS` (default 180).
+
+**Side effects:** the question and answer are saved to the notebook's chat history in the user's account (the skill never clears it). Refreshed cookies are saved to `state.json`. On failure, `data/debug/<timestamp>-<reason>.png` and `.html` are written (`no-input`, `no-answer`, `error`).
+
+## notebook_manager.py
 
 ```bash
-# Setup (browser visible for login)
-python scripts/run.py auth_manager.py setup
-
-# Check status
-python scripts/run.py auth_manager.py status
-
-# Re-authenticate
-python scripts/run.py auth_manager.py reauth
-
-# Clear authentication
-python scripts/run.py auth_manager.py clear
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py notebook_manager.py add \
+  --url URL --name NAME --description DESC --topics "t1,t2" [--use-cases "a,b"] [--tags "x,y"]
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py notebook_manager.py list
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py notebook_manager.py search --query QUERY
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py notebook_manager.py activate --id ID
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py notebook_manager.py remove --id ID
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py notebook_manager.py stats
 ```
 
-**Commands:**
-- `setup`: Initial authentication (browser MUST be visible)
-- `status`: Check if authenticated
-- `reauth`: Clear and re-setup
-- `clear`: Remove all auth data
+| Command | Notes |
+|---------|-------|
+| `add` | `--url`, `--name`, `--description`, `--topics` required. ID = slug of the name (`a-z0-9-`). Rejects a URL already in the library or a duplicate ID (exit 1). The first notebook added becomes active. Prints the new entry as JSON. |
+| `list` | Name, ID, topics, use count; the active one is marked `[ACTIVE]`. |
+| `search` | Case-insensitive substring match on name, description, topics, tags, use cases. |
+| `activate` | Set the default notebook for `ask_question.py`. Exit 1 if not found. |
+| `remove` | Remove from the library (not from Google). If it was active, the first remaining notebook becomes active. |
+| `stats` | Counts, active and most-used notebook, library path. |
 
-### cleanup_manager.py
-Clean skill data with preservation options.
+`--id` accepts current IDs, legacy IDs and names (slugified). On load, legacy IDs (which could contain `:` or `&`) are re-keyed to slugs with the old ID kept as `legacy_id`, and stored URLs are normalized to `notebook.google.com`.
+
+**Library entry** (`data/library.json`):
+
+```json
+{
+  "id": "react-docs",
+  "url": "https://notebook.google.com/notebook/abc123",
+  "name": "React Docs",
+  "description": "...",
+  "topics": ["react", "hooks"],
+  "content_types": [],
+  "use_cases": [],
+  "tags": [],
+  "created_at": "...",
+  "updated_at": "...",
+  "use_count": 0,
+  "last_used": null
+}
+```
+
+## auth_manager.py
 
 ```bash
-# Preview cleanup
-python scripts/run.py cleanup_manager.py
-
-# Execute cleanup
-python scripts/run.py cleanup_manager.py --confirm
-
-# Keep library
-python scripts/run.py cleanup_manager.py --confirm --preserve-library
-
-# Force without prompt
-python scripts/run.py cleanup_manager.py --confirm --force
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py status
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py validate
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py setup [--timeout MIN]
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py reauth [--timeout MIN]
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py auth_manager.py clear
 ```
 
-**Options:**
-- `--confirm`: Actually perform cleanup
-- `--preserve-library`: Keep notebook library
-- `--force`: Skip confirmation prompt
+| Command | Description |
+|---------|-------------|
+| `status` | Offline check that `state.json` holds an unexpired Google session cookie (`SID`, `__Secure-1PSID`, `__Secure-3PSID`). Prints state age and last login. |
+| `validate` | Live headless check against `https://notebook.google.com/login` (redirects to `accounts.google.com` when signed out). Refreshes saved cookies on success; exit 1 if invalid. |
+| `setup` | Visible Chrome; the user signs in. Waits up to 10 minutes (`--timeout`). |
+| `reauth` | `clear` + `setup`. Use for exit 2 or to switch accounts. |
+| `clear` | Delete saved cookies, auth info and the browser profile. |
 
-### run.py
-Script wrapper that handles environment setup.
+Tell the user before `setup`/`reauth`: they open a window and wait for a human. `setup --headless` exists but only succeeds if the profile is already signed in. Details: `AUTHENTICATION.md`.
+
+## setup_environment.py
 
 ```bash
-# Usage
-python scripts/run.py [script_name].py [arguments]
-
-# Examples
-python scripts/run.py auth_manager.py status
-python scripts/run.py ask_question.py --question "..."
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py            # create/update .venv
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py --check    # report only
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py setup_environment.py --recreate # delete and rebuild .venv
 ```
 
-**Automatic actions:**
-1. Creates `.venv` if missing
-2. Installs dependencies
-3. Activates environment
-4. Executes target script
+The only script that installs anything; ask the user first. It runs on the interpreter that invoked `run.py`, creates `.venv` inside the skill directory, upgrades pip and installs `requirements.txt` (`patchright==1.63.0`, `python-dotenv==1.2.4`) there, and writes `.venv/.requirements.sha256`. It uses the installed Google Chrome and only runs `patchright install chrome` if Chrome is not found in the standard location (that install may ask for sudo). No conda environment is modified.
 
-## Python API Usage
+## cleanup_manager.py
 
-### Using subprocess with run.py
+```bash
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py cleanup_manager.py                                   # preview
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py cleanup_manager.py --confirm --preserve-library      # delete, keep library
+python3 ${CLAUDE_SKILL_DIR}/scripts/run.py cleanup_manager.py --confirm --preserve-library --force  # no prompt
+```
+
+Deletes the contents of `data/` (browser state, auth info, debug snapshots, and `library.json` unless `--preserve-library`). `--confirm` without `--force` asks for `yes` on stdin. `.venv` is never deleted.
+
+## Configuration
+
+Optional `${CLAUDE_SKILL_DIR}/.env`, loaded by `config.py`; real environment variables take precedence:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `HEADLESS` | `true` | `false` shows the browser on every query |
+| `QUERY_TIMEOUT_SECONDS` | `180` | Max wait for an answer |
+| `TYPING_DELAY_MS_MIN` / `TYPING_DELAY_MS_MAX` | `15` / `45` | Per-character typing delay |
+| `DEFAULT_NOTEBOOK_ID` | unset | Notebook used when no `--notebook-id`/`--notebook-url` is given; takes precedence over the active notebook |
+
+Fixed in `config.py`: login timeout 10 min, page load 30 s, chat input wait 20 s, and all UI selectors.
+
+## Data
+
+```
+${CLAUDE_SKILL_DIR}/data/          # git-ignored, never commit
+├── library.json
+├── auth_info.json
+├── browser_state/
+│   ├── state.json
+│   └── browser_profile/
+└── debug/                         # failure screenshots + HTML
+```
+
+## Calling from Python
 
 ```python
 import subprocess
-import json
+from pathlib import Path
 
-# Always use run.py wrapper
-result = subprocess.run([
-    "python", "scripts/run.py", "ask_question.py",
-    "--question", "Your question",
-    "--notebook-id", "notebook-id"
-], capture_output=True, text=True)
+RUN = Path.home() / ".claude/skills/notebooklm/scripts/run.py"
 
+result = subprocess.run(
+    ["python3", str(RUN), "ask_question.py", "--question", "...", "--notebook-id", "react-docs"],
+    capture_output=True, text=True,
+)
+if result.returncode == 2:
+    ...  # ask the user to run auth_manager.py reauth
+elif result.returncode == 3:
+    ...  # ask the user to run setup_environment.py
 answer = result.stdout
 ```
 
-### Direct imports (after venv exists)
+Run queries sequentially. Every query launches Chrome on the same profile directory, and a Chrome profile can only be used by one browser process at a time.
 
-```python
-# Only works if venv is already created and activated
-from notebook_manager import NotebookLibrary
-from auth_manager import AuthManager
+## Module classes
 
-library = NotebookLibrary()
-notebooks = library.list_notebooks()
+Import only from within the venv with `scripts/` on `sys.path`.
 
-auth = AuthManager()
-is_auth = auth.is_authenticated()
-```
+### `notebook_manager.NotebookLibrary`
+- `add_notebook(url, name, description, topics, content_types=None, use_cases=None, tags=None)`
+- `remove_notebook(notebook_id)`, `update_notebook(notebook_id, ...)`
+- `resolve_id(notebook_id)`, `get_notebook(notebook_id)`, `list_notebooks()`, `search_notebooks(query)`
+- `select_notebook(notebook_id)`, `get_active_notebook()`
+- `increment_use_count(notebook_id)`, `get_stats()`
 
-## Data Storage
+### `auth_manager.AuthManager`
+- `is_authenticated()` (offline), `validate_auth()` (live), `get_auth_info()`
+- `setup_auth(headless=False, timeout_minutes=10)`, `re_auth(...)`, `clear_auth()`
 
-Location: `~/.claude/skills/notebooklm/data/`
+### `browser_utils`
+- `BrowserFactory.launch_persistent_context(playwright, headless=True)`: Chrome on the skill profile with cookies injected
+- `BrowserFactory.new_page(context, headless)`: first page, headless UA masked
+- `StealthUtils.human_type`, `find_first_visible`, `dismiss_dialogs`, `random_delay`
 
-```
-data/
-├── library.json       # Notebook metadata
-├── auth_info.json     # Auth status
-└── browser_state/     # Browser cookies
-    └── state.json
-```
-
-**Security:** Protected by `.gitignore`, never commit.
-
-## Environment Variables
-
-Optional `.env` file configuration:
-
-```env
-HEADLESS=false           # Browser visibility
-SHOW_BROWSER=false       # Default display
-STEALTH_ENABLED=true     # Human behavior
-TYPING_WPM_MIN=160       # Typing speed
-TYPING_WPM_MAX=240
-DEFAULT_NOTEBOOK_ID=     # Default notebook
-```
-
-## Error Handling
-
-Common patterns:
-
-```python
-# Using run.py prevents most errors
-result = subprocess.run([
-    "python", "scripts/run.py", "ask_question.py",
-    "--question", "Question"
-], capture_output=True, text=True)
-
-if result.returncode != 0:
-    error = result.stderr
-    if "rate limit" in error.lower():
-        # Wait or switch accounts
-        pass
-    elif "not authenticated" in error.lower():
-        # Run auth setup
-        subprocess.run(["python", "scripts/run.py", "auth_manager.py", "setup"])
-```
-
-## Rate Limits
-
-Free Google accounts: 50 queries/day
-
-Solutions:
-1. Wait for reset (midnight PST)
-2. Switch accounts with `reauth`
-3. Use multiple Google accounts
-
-## Advanced Patterns
-
-### Parallel Queries
-
-```python
-import concurrent.futures
-import subprocess
-
-def query(question, notebook_id):
-    result = subprocess.run([
-        "python", "scripts/run.py", "ask_question.py",
-        "--question", question,
-        "--notebook-id", notebook_id
-    ], capture_output=True, text=True)
-    return result.stdout
-
-# Run multiple queries simultaneously
-with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-    futures = [
-        executor.submit(query, q, nb)
-        for q, nb in zip(questions, notebooks)
-    ]
-    results = [f.result() for f in futures]
-```
-
-### Batch Processing
-
-```python
-def batch_research(questions, notebook_id):
-    results = []
-    for question in questions:
-        result = subprocess.run([
-            "python", "scripts/run.py", "ask_question.py",
-            "--question", question,
-            "--notebook-id", notebook_id
-        ], capture_output=True, text=True)
-        results.append(result.stdout)
-        time.sleep(2)  # Avoid rate limits
-    return results
-```
-
-## Module Classes
-
-### NotebookLibrary
-- `add_notebook(url, name, topics)`
-- `list_notebooks()`
-- `search_notebooks(query)`
-- `get_notebook(notebook_id)`
-- `activate_notebook(notebook_id)`
-- `remove_notebook(notebook_id)`
-
-### AuthManager
-- `is_authenticated()`
-- `setup_auth(headless=False)`
-- `get_auth_info()`
-- `clear_auth()`
-- `validate_auth()`
-
-### BrowserSession (internal)
-- Handles browser automation
-- Manages stealth behavior
-- Not intended for direct use
-
-## Best Practices
-
-1. **Always use run.py** - Ensures environment
-2. **Check auth first** - Before operations
-3. **Handle rate limits** - Implement retries
-4. **Include context** - Questions are independent
-5. **Clean sessions** - Use cleanup_manager
+### `ask_question`
+- `ask_notebooklm(question, notebook_url, headless=True)`: returns the answer or `None`; raises `AuthExpired` on a login redirect

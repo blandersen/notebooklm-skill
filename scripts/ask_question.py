@@ -1,255 +1,365 @@
 #!/usr/bin/env python3
 """
-Simple NotebookLM Question Interface
-Based on MCP server implementation - simplified without sessions
+NotebookLM (Gemini Notebook) Question Interface
+Opens the notebook in a fresh browser session, asks one question, returns the answer.
 
-Implements hybrid auth approach:
+Hybrid auth approach:
 - Persistent browser profile (user_data_dir) for fingerprint consistency
-- Manual cookie injection from state.json for session cookies (Playwright bug workaround)
-See: https://github.com/microsoft/playwright/issues/36139
+- Cookie injection from state.json for session cookies (Playwright bug #36139)
 """
 
 import argparse
+import re
 import sys
 import time
-import re
 from pathlib import Path
+from typing import Optional, Tuple
 
-from patchright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright, Page
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from auth_manager import AuthManager
 from notebook_manager import NotebookLibrary
-from config import QUERY_INPUT_SELECTORS, RESPONSE_SELECTORS
+from config import (
+    QUERY_INPUT_SELECTORS, RESPONSE_SELECTORS, THINKING_SELECTORS,
+    PAIR_SELECTOR, USER_TEXT_SELECTOR, ANSWER_TEXT_SELECTOR, ANSWER_DONE_SELECTOR,
+    THOUGHTS_SELECTOR, CITATION_SELECTOR,
+    HEADLESS, DEFAULT_NOTEBOOK_ID, QUERY_TIMEOUT_SECONDS, PAGE_LOAD_TIMEOUT,
+    INPUT_WAIT_TIMEOUT, LOGIN_HOST, DATA_DIR, NOTEBOOK_URL_PATTERN, normalize_notebook_url,
+)
 from browser_utils import BrowserFactory, StealthUtils
 
+RUN = f"python3 {Path(__file__).resolve().parent / 'run.py'}"
+DEBUG_DIR = DATA_DIR / "debug"
 
-# Follow-up reminder (adapted from MCP server for stateless operation)
-# Since we don't have persistent sessions, we encourage comprehensive questions
+# Appended to every answer. The notebook's chat history persists between calls, but
+# whether earlier turns are used as context is not guaranteed, so follow-ups restate it.
 FOLLOW_UP_REMINDER = (
-    "\n\nEXTREMELY IMPORTANT: Is that ALL you need to know? "
-    "You can always ask another question! Think about it carefully: "
-    "before you reply to the user, review their original request and this answer. "
-    "If anything is still unclear or missing, ask me another comprehensive question "
-    "that includes all necessary context (since each question opens a new browser session)."
+    "\n\n[Note to assistant: if this answer leaves a gap in the user's request, ask one "
+    "self-contained follow-up that restates the needed context; otherwise answer the user.]"
 )
 
+EXIT_OK, EXIT_FAILED, EXIT_AUTH = 0, 1, 2
 
-def ask_notebooklm(question: str, notebook_url: str, headless: bool = True) -> str:
+
+class AuthExpired(Exception):
+    pass
+
+
+def _responses(page: Page) -> Tuple[int, Optional[str]]:
+    """Fallback: count of answer bubbles and text of the newest"""
+    for selector in RESPONSE_SELECTORS:
+        try:
+            elements = page.query_selector_all(selector)
+        except Exception:
+            continue
+        if elements:
+            try:
+                return len(elements), elements[-1].inner_text().strip()
+            except Exception:
+                return len(elements), None
+    return 0, None
+
+
+# Reads the newest Q&A pair; the answer text excludes the Thoughts panel and
+# renders citation markers as [n] and math as $LaTeX$. Works on a clone so the live DOM is untouched.
+LAST_PAIR_JS = """([pairSel, userSel, answerSel, doneSel, thoughtsSel, citeSel]) => {
+    const pairs = document.querySelectorAll(pairSel);
+    if (!pairs.length) return null;
+    const pair = pairs[pairs.length - 1];
+    const user = pair.querySelector(userSel);
+    const answer = pair.querySelector(answerSel);
+    let text = null;
+    if (answer) {
+        const clone = answer.cloneNode(true);
+        clone.querySelectorAll(thoughtsSel).forEach(e => e.remove());
+        clone.querySelectorAll(citeSel).forEach(e => {
+            const n = e.textContent.trim();
+            e.replaceWith(/^\\d+$/.test(n) ? ` [${n}]` : '');
+        });
+        clone.querySelectorAll('mat-icon').forEach(e => e.remove());
+        // KaTeX keeps the LaTeX source in data-math; emit it instead of the glyph soup
+        clone.querySelectorAll('[data-math]').forEach(e => e.replaceWith(`$${e.dataset.math}$`));
+        clone.querySelectorAll('sup').forEach(e => e.prepend('^'));
+        clone.querySelectorAll('sub').forEach(e => e.prepend('_'));
+        // Detached nodes have no layout, so add line breaks for block elements by hand
+        clone.querySelectorAll('div, p, li, h1, h2, h3, h4, tr, br').forEach(e => e.append('\\n'));
+        clone.querySelectorAll('li').forEach(e => e.prepend('- '));
+        text = clone.textContent.replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+    }
+    return {
+        count: pairs.length,
+        user: user ? user.innerText.trim() : null,
+        answer: text,
+        done: !!pair.querySelector(doneSel),
+    };
+}"""
+
+
+def _last_pair(page: Page) -> Optional[dict]:
+    try:
+        return page.evaluate(LAST_PAIR_JS, [
+            PAIR_SELECTOR, USER_TEXT_SELECTOR, ANSWER_TEXT_SELECTOR,
+            ANSWER_DONE_SELECTOR, THOUGHTS_SELECTOR, CITATION_SELECTOR,
+        ])
+    except Exception:
+        return None
+
+
+def _normalize(text: str) -> str:
+    """Compare questions loosely: the UI may re-render markdown or whitespace"""
+    return re.sub(r"\W+", " ", text).strip().lower()
+
+
+def _is_thinking(page: Page) -> bool:
+    for selector in THINKING_SELECTORS:
+        try:
+            element = page.query_selector(selector)
+            if element and element.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _save_debug(page: Optional[Page], reason: str):
+    """Keep a screenshot and DOM dump so selector drift can be diagnosed"""
+    if page is None:
+        return
+    try:
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        page.screenshot(path=str(DEBUG_DIR / f"{stamp}-{reason}.png"), full_page=True)
+        (DEBUG_DIR / f"{stamp}-{reason}.html").write_text(page.content())
+        print(f"  🧪 Saved debug snapshot to {DEBUG_DIR}/{stamp}-{reason}.*")
+    except Exception as e:
+        print(f"  ⚠️ Could not save debug snapshot: {e}")
+
+
+def _wait_for_answer(page: Page, question: str, baseline_pairs: int,
+                     baseline_count: int, baseline_text: Optional[str]) -> Optional[str]:
     """
-    Ask a question to NotebookLM
+    Wait for the answer to our question, then for its text to settle.
+    Notebooks keep chat history, so the answer must be in a pair added after
+    submitting whose user bubble holds our question.
+    """
+    deadline = time.time() + QUERY_TIMEOUT_SECONDS
+    asked = _normalize(question)[:200]
+    last_text = None
+    stable_polls = 0
 
-    Args:
-        question: Question to ask
-        notebook_url: NotebookLM notebook URL
-        headless: Run browser in headless mode
+    while time.time() < deadline:
+        time.sleep(1)
+        if _is_thinking(page):
+            stable_polls = 0
+            continue
 
-    Returns:
-        Answer text from NotebookLM
+        pair = _last_pair(page)
+        if pair is not None:
+            ours = (pair["count"] > baseline_pairs and pair["user"]
+                    and _normalize(pair["user"])[:200] == asked)
+            text = pair["answer"] if ours else None
+            done = pair["done"]
+        else:
+            # Fallback for an unknown layout: any bubble that was not there before
+            count, text = _responses(page)
+            if not (count > baseline_count or (text and text != baseline_text)):
+                text = None
+            done = False
+
+        if not text:
+            stable_polls = 0
+            continue
+        if text == last_text:
+            stable_polls += 1
+            # Finished marker plus a short settle, or a longer settle without it
+            if (done and stable_polls >= 2) or stable_polls >= 6:
+                return text
+        else:
+            stable_polls = 0
+            last_text = text
+
+    return None
+
+
+def ask_notebooklm(question: str, notebook_url: str, headless: bool = True) -> Optional[str]:
+    """
+    Ask a question to a notebook
+
+    Raises:
+        AuthExpired: when Google redirects to the login page
     """
     auth = AuthManager()
-
     if not auth.is_authenticated():
-        print("⚠️ Not authenticated. Run: python auth_manager.py setup")
-        return None
+        raise AuthExpired("No saved Google session")
 
     print(f"💬 Asking: {question}")
     print(f"📚 Notebook: {notebook_url}")
 
     playwright = None
     context = None
+    page = None
 
     try:
-        # Start playwright
         playwright = sync_playwright().start()
+        context = BrowserFactory.launch_persistent_context(playwright, headless=headless)
+        page = BrowserFactory.new_page(context, headless)
 
-        # Launch persistent browser context using factory
-        context = BrowserFactory.launch_persistent_context(
-            playwright,
-            headless=headless
-        )
-
-        # Navigate to notebook
-        page = context.new_page()
         print("  🌐 Opening notebook...")
-        page.goto(notebook_url, wait_until="domcontentloaded")
+        page.goto(notebook_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+        if LOGIN_HOST in page.url:
+            raise AuthExpired("Redirected to Google login")
 
-        # Wait for NotebookLM
-        page.wait_for_url(re.compile(r"^https://notebooklm\.google\.com/"), timeout=10000)
-
-        # Wait for query input (MCP approach)
         print("  ⏳ Waiting for query input...")
-        query_element = None
-
-        for selector in QUERY_INPUT_SELECTORS:
-            try:
-                query_element = page.wait_for_selector(
-                    selector,
-                    timeout=10000,
-                    state="visible"  # Only check visibility, not disabled!
-                )
-                if query_element:
-                    print(f"  ✓ Found input: {selector}")
-                    break
-            except:
-                continue
-
+        query_element = StealthUtils.find_first_visible(page, QUERY_INPUT_SELECTORS, INPUT_WAIT_TIMEOUT)
+        if LOGIN_HOST in page.url:
+            raise AuthExpired("Redirected to Google login")
         if not query_element:
-            print("  ❌ Could not find query input")
+            print("  ❌ Could not find the chat input (UI may have changed)")
+            _save_debug(page, "no-input")
             return None
 
-        # Type question (human-like, fast)
-        print("  ⏳ Typing question...")
-        
-        # Use primary selector for typing
-        input_selector = QUERY_INPUT_SELECTORS[0]
-        StealthUtils.human_type(page, input_selector, question)
+        # Let restored chat history and any promo dialogs render first
+        StealthUtils.random_delay(1000, 1500)
+        if StealthUtils.dismiss_dialogs(page):
+            print("  ✓ Dismissed overlay dialog")
+        baseline_count, baseline_text = _responses(page)
+        baseline_pair = _last_pair(page)
+        baseline_pairs = baseline_pair["count"] if baseline_pair else 0
 
-        # Submit
+        # A missing or unshared notebook briefly renders, then redirects to the home page
+        if not NOTEBOOK_URL_PATTERN.match(page.url):
+            print("  ❌ Notebook not found, or this Google account has no access to it")
+            return None
+
+        # Re-query: the element found earlier may have been re-rendered
+        query_element = StealthUtils.find_first_visible(page, QUERY_INPUT_SELECTORS, INPUT_WAIT_TIMEOUT)
+        if not query_element:
+            print("  ❌ Chat input disappeared")
+            _save_debug(page, "no-input")
+            return None
+
+        print("  ⏳ Typing question...")
+        StealthUtils.human_type(page, query_element, question)
+        StealthUtils.random_delay(200, 500)
+
         print("  📤 Submitting...")
         page.keyboard.press("Enter")
 
-        # Small pause
-        StealthUtils.random_delay(500, 1500)
-
-        # Wait for response (MCP approach: poll for stable text)
         print("  ⏳ Waiting for answer...")
-
-        answer = None
-        stable_count = 0
-        last_text = None
-        deadline = time.time() + 120  # 2 minutes timeout
-
-        while time.time() < deadline:
-            # Check if NotebookLM is still thinking (most reliable indicator)
-            try:
-                thinking_element = page.query_selector('div.thinking-message')
-                if thinking_element and thinking_element.is_visible():
-                    time.sleep(1)
-                    continue
-            except:
-                pass
-
-            # Try to find response with MCP selectors
-            for selector in RESPONSE_SELECTORS:
-                try:
-                    elements = page.query_selector_all(selector)
-                    if elements:
-                        # Get last (newest) response
-                        latest = elements[-1]
-                        text = latest.inner_text().strip()
-
-                        if text:
-                            if text == last_text:
-                                stable_count += 1
-                                if stable_count >= 3:  # Stable for 3 polls
-                                    answer = text
-                                    break
-                            else:
-                                stable_count = 0
-                                last_text = text
-                except:
-                    continue
-
-            if answer:
-                break
-
-            time.sleep(1)
-
+        answer = _wait_for_answer(page, question, baseline_pairs, baseline_count, baseline_text)
         if not answer:
-            print("  ❌ Timeout waiting for answer")
+            print(f"  ❌ No answer within {QUERY_TIMEOUT_SECONDS}s")
+            _save_debug(page, "no-answer")
             return None
 
-        print("  ✅ Got answer!")
-        # Add follow-up reminder to encourage Claude to ask more questions
-        return answer + FOLLOW_UP_REMINDER
+        # Persist rotated session cookies so the login lasts longer
+        try:
+            auth._save_browser_state(context)
+        except Exception:
+            pass
 
+        print("  ✅ Got answer!")
+        return answer
+
+    except AuthExpired:
+        raise
     except Exception as e:
         print(f"  ❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        _save_debug(page, "error")
         return None
 
     finally:
-        # Always clean up
         if context:
             try:
                 context.close()
-            except:
+            except Exception:
                 pass
-
         if playwright:
             try:
                 playwright.stop()
-            except:
+            except Exception:
                 pass
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Ask NotebookLM a question')
+    parser = argparse.ArgumentParser(description='Ask a NotebookLM / Gemini Notebook a question')
 
     parser.add_argument('--question', required=True, help='Question to ask')
-    parser.add_argument('--notebook-url', help='NotebookLM notebook URL')
+    parser.add_argument('--notebook-url', help='Notebook URL')
     parser.add_argument('--notebook-id', help='Notebook ID from library')
     parser.add_argument('--show-browser', action='store_true', help='Show browser')
 
     args = parser.parse_args()
 
-    # Resolve notebook URL
+    library = NotebookLibrary()
     notebook_url = args.notebook_url
+    notebook_id = args.notebook_id or (None if notebook_url else DEFAULT_NOTEBOOK_ID)
 
-    if not notebook_url and args.notebook_id:
-        library = NotebookLibrary()
-        notebook = library.get_notebook(args.notebook_id)
-        if notebook:
-            notebook_url = notebook['url']
-        else:
-            print(f"❌ Notebook '{args.notebook_id}' not found")
-            return 1
+    if not notebook_url and notebook_id:
+        notebook = library.get_notebook(notebook_id)
+        if not notebook:
+            print(f"❌ Notebook '{notebook_id}' not found. List with: {RUN} notebook_manager.py list")
+            return EXIT_FAILED
+        notebook_url = notebook['url']
+        notebook_id = notebook['id']
 
     if not notebook_url:
-        # Check for active notebook first
-        library = NotebookLibrary()
         active = library.get_active_notebook()
         if active:
             notebook_url = active['url']
+            notebook_id = active['id']
             print(f"📚 Using active notebook: {active['name']}")
         else:
-            # Show available notebooks
             notebooks = library.list_notebooks()
             if notebooks:
                 print("\n📚 Available notebooks:")
                 for nb in notebooks:
-                    mark = " [ACTIVE]" if nb.get('id') == library.active_notebook_id else ""
-                    print(f"  {nb['id']}: {nb['name']}{mark}")
-                print("\nSpecify with --notebook-id or set active:")
-                print("python scripts/run.py notebook_manager.py activate --id ID")
+                    print(f"  {nb['id']}: {nb['name']}")
+                print(f"\nSpecify with --notebook-id or set one active: {RUN} notebook_manager.py activate --id ID")
             else:
-                print("❌ No notebooks in library. Add one first:")
-                print("python scripts/run.py notebook_manager.py add --url URL --name NAME --description DESC --topics TOPICS")
-            return 1
+                print(f"❌ No notebooks in library. Add one: {RUN} notebook_manager.py add --url URL --name NAME --description DESC --topics TOPICS")
+            return EXIT_FAILED
 
-    # Ask the question
-    answer = ask_notebooklm(
-        question=args.question,
-        notebook_url=notebook_url,
-        headless=not args.show_browser
-    )
+    try:
+        notebook_url = normalize_notebook_url(notebook_url)
+    except ValueError as e:
+        print(f"❌ {e}")
+        return EXIT_FAILED
 
-    if answer:
-        print("\n" + "=" * 60)
-        print(f"Question: {args.question}")
-        print("=" * 60)
-        print()
-        print(answer)
-        print()
-        print("=" * 60)
-        return 0
-    else:
+    if not notebook_id:
+        notebook_id = next((nb['id'] for nb in library.list_notebooks() if nb['url'] == notebook_url), None)
+
+    try:
+        answer = ask_notebooklm(
+            question=args.question,
+            notebook_url=notebook_url,
+            headless=HEADLESS and not args.show_browser,
+        )
+    except AuthExpired as e:
+        print(f"\n🔐 Not authenticated ({e}).")
+        print(f"   Ask the user to run (a browser window opens for Google login): {RUN} auth_manager.py reauth")
+        return EXIT_AUTH
+
+    if not answer:
         print("\n❌ Failed to get answer")
-        return 1
+        return EXIT_FAILED
+
+    if notebook_id:
+        try:
+            library.increment_use_count(notebook_id)
+        except Exception:
+            pass
+
+    print("\n" + "=" * 60)
+    print(f"Question: {args.question}")
+    print("=" * 60)
+    print()
+    print(answer + FOLLOW_UP_REMINDER)
+    print()
+    print("=" * 60)
+    return EXIT_OK
 
 
 if __name__ == "__main__":

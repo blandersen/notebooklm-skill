@@ -1,204 +1,88 @@
 #!/usr/bin/env python3
 """
 Environment Setup for NotebookLM Skill
-Manages virtual environment and dependencies automatically
+Creates the skill-local .venv and installs requirements.txt into it.
+This is the only script that installs packages; run.py never calls it implicitly.
 """
 
+import argparse
 import os
-import sys
+import platform
+import shutil
 import subprocess
+import sys
 import venv
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
 
-class SkillEnvironment:
-    """Manages skill-specific virtual environment"""
+from run import VENV_DIR, REQUIREMENTS, STAMP, venv_python, requirements_hash
 
-    def __init__(self):
-        # Skill directory paths
-        self.skill_dir = Path(__file__).parent.parent
-        self.venv_dir = self.skill_dir / ".venv"
-        self.requirements_file = self.skill_dir / "requirements.txt"
+# Standard Google Chrome locations; patchright drives real Chrome via channel="chrome"
+CHROME_PATHS = {
+    "Darwin": [Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+               Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
+    "Linux": [Path("/opt/google/chrome/chrome")],
+    "Windows": [Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Google/Chrome/Application/chrome.exe",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe"],
+}
 
-        # Python executable in venv
-        if os.name == 'nt':  # Windows
-            self.venv_python = self.venv_dir / "Scripts" / "python.exe"
-            self.venv_pip = self.venv_dir / "Scripts" / "pip.exe"
-        else:  # Unix/Linux/Mac
-            self.venv_python = self.venv_dir / "bin" / "python"
-            self.venv_pip = self.venv_dir / "bin" / "pip"
 
-    def ensure_venv(self) -> bool:
-        """Ensure virtual environment exists and is set up"""
+def chrome_installed() -> bool:
+    if any(p.exists() for p in CHROME_PATHS.get(platform.system(), [])):
+        return True
+    return any(shutil.which(n) for n in ("google-chrome", "google-chrome-stable"))
 
-        # Check if we're already in the correct venv
-        if self.is_in_skill_venv():
-            print("✅ Already running in skill virtual environment")
-            return True
 
-        # Create venv if it doesn't exist
-        if not self.venv_dir.exists():
-            print(f"🔧 Creating virtual environment in {self.venv_dir.name}/")
-            try:
-                venv.create(self.venv_dir, with_pip=True)
-                print("✅ Virtual environment created")
-            except Exception as e:
-                print(f"❌ Failed to create venv: {e}")
-                return False
-
-        # Install/update dependencies
-        if self.requirements_file.exists():
-            print("📦 Installing dependencies...")
-            try:
-                # Upgrade pip first
-                subprocess.run(
-                    [str(self.venv_pip), "install", "--upgrade", "pip"],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-
-                # Install requirements
-                result = subprocess.run(
-                    [str(self.venv_pip), "install", "-r", str(self.requirements_file)],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                print("✅ Dependencies installed")
-
-                # Install Chrome for Patchright (not Chromium!)
-                # Using real Chrome ensures cross-platform reliability and consistent browser fingerprinting
-                # See: https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python#anti-detection
-                print("🌐 Installing Google Chrome for Patchright...")
-                try:
-                    subprocess.run(
-                        [str(self.venv_python), "-m", "patchright", "install", "chrome"],
-                        check=True,
-                        capture_output=True,
-                        text=True
-                    )
-                    print("✅ Chrome installed")
-                except subprocess.CalledProcessError as e:
-                    print(f"⚠️ Warning: Failed to install Chrome: {e}")
-                    print("   You may need to run manually: python -m patchright install chrome")
-                    print("   Chrome is required (not Chromium) for reliability!")
-
-                return True
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to install dependencies: {e}")
-                print(f"   Output: {e.output if hasattr(e, 'output') else 'No output'}")
-                return False
-        else:
-            print("⚠️ No requirements.txt found, skipping dependency installation")
-            return True
-
-    def is_in_skill_venv(self) -> bool:
-        """Check if we're already running in the skill's venv"""
-        if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
-            # We're in a venv, check if it's ours
-            venv_path = Path(sys.prefix)
-            return venv_path == self.venv_dir
-        return False
-
-    def get_python_executable(self) -> str:
-        """Get the correct Python executable to use"""
-        if self.venv_python.exists():
-            return str(self.venv_python)
-        return sys.executable
-
-    def run_script(self, script_name: str, args: list = None) -> int:
-        """Run a script with the virtual environment"""
-        script_path = self.skill_dir / "scripts" / script_name
-
-        if not script_path.exists():
-            print(f"❌ Script not found: {script_path}")
-            return 1
-
-        # Ensure venv is set up
-        if not self.ensure_venv():
-            print("❌ Failed to set up environment")
-            return 1
-
-        # Build command
-        cmd = [str(self.venv_python), str(script_path)]
-        if args:
-            cmd.extend(args)
-
-        print(f"🚀 Running: {script_name} with venv Python")
-
-        try:
-            # Run the script with venv Python
-            result = subprocess.run(cmd)
-            return result.returncode
-        except Exception as e:
-            print(f"❌ Failed to run script: {e}")
-            return 1
-
-    def activate_instructions(self) -> str:
-        """Get instructions for manual activation"""
-        if os.name == 'nt':
-            activate = self.venv_dir / "Scripts" / "activate.bat"
-            return f"Run: {activate}"
-        else:
-            activate = self.venv_dir / "bin" / "activate"
-            return f"Run: source {activate}"
+def run(cmd):
+    print(f"  $ {' '.join(map(str, cmd))}")
+    subprocess.run([str(c) for c in cmd], check=True)
 
 
 def main():
-    """Main entry point for environment setup"""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description='Setup NotebookLM skill environment'
-    )
-
-    parser.add_argument(
-        '--check',
-        action='store_true',
-        help='Check if environment is set up'
-    )
-
-    parser.add_argument(
-        '--run',
-        help='Run a script with the venv (e.g., --run ask_question.py)'
-    )
-
-    parser.add_argument(
-        'args',
-        nargs='*',
-        help='Arguments to pass to the script'
-    )
-
+    parser = argparse.ArgumentParser(description='Set up the NotebookLM skill environment')
+    parser.add_argument('--recreate', action='store_true', help='Delete and rebuild .venv')
+    parser.add_argument('--check', action='store_true', help='Only report status')
     args = parser.parse_args()
 
-    env = SkillEnvironment()
-
     if args.check:
-        if env.venv_dir.exists():
-            print(f"✅ Virtual environment exists: {env.venv_dir}")
-            print(f"   Python: {env.get_python_executable()}")
-            print(f"   To activate manually: {env.activate_instructions()}")
-        else:
-            print(f"❌ No virtual environment found")
-            print(f"   Run setup_environment.py to create it")
-        return
+        print(f"  .venv:   {'present' if venv_python().exists() else 'missing'} ({VENV_DIR})")
+        stamp_ok = STAMP.exists() and STAMP.read_text().strip() == requirements_hash()
+        print(f"  deps:    {'up to date' if stamp_ok else 'not installed or outdated'}")
+        print(f"  Chrome:  {'found' if chrome_installed() else 'not found'}")
+        return 0
 
-    if args.run:
-        # Run a script with venv
-        return env.run_script(args.run, args.args)
+    if args.recreate and VENV_DIR.exists():
+        print(f"🗑️ Removing {VENV_DIR}")
+        shutil.rmtree(VENV_DIR)
 
-    # Default: ensure environment is set up
-    if env.ensure_venv():
-        print("\n✅ Environment ready!")
-        print(f"   Virtual env: {env.venv_dir}")
-        print(f"   Python: {env.get_python_executable()}")
-        print(f"\nTo activate manually: {env.activate_instructions()}")
-        print(f"Or run scripts directly: python setup_environment.py --run script_name.py")
-    else:
-        print("\n❌ Environment setup failed")
+    if not venv_python().exists():
+        print(f"🔧 Creating virtual environment with {sys.executable}")
+        venv.create(VENV_DIR, with_pip=True)
+
+    print("📦 Installing requirements into .venv")
+    try:
+        run([venv_python(), "-m", "pip", "install", "--upgrade", "pip"])
+        run([venv_python(), "-m", "pip", "install", "-r", REQUIREMENTS])
+    except subprocess.CalledProcessError as e:
+        print(f"❌ pip failed: {e}")
         return 1
+
+    if chrome_installed():
+        print("✅ Google Chrome found")
+    else:
+        # On macOS/Linux this downloads Chrome and may prompt for sudo
+        print("🌐 Google Chrome not found; installing via patchright")
+        try:
+            run([venv_python(), "-m", "patchright", "install", "chrome"])
+        except subprocess.CalledProcessError:
+            print("⚠️ Chrome install failed. Install Google Chrome manually from https://www.google.com/chrome/")
+            return 1
+
+    STAMP.write_text(requirements_hash())
+    print("\n✅ Environment ready")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main() or 0)
+    sys.exit(main())

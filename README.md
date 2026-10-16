@@ -1,415 +1,220 @@
-> [!WARNING]
-> **This project is no longer maintained.** As of September 2026 the repository is archived: no updates, bug fixes or support. It may stop working when the upstream services change. Feel free to fork.
+> [!NOTE]
+> This is a maintained fork of [PleasePrompto/notebooklm-skill](https://github.com/PleasePrompto/notebooklm-skill), which was archived in September 2026. Fork: [blandersen/notebooklm-skill](https://github.com/blandersen/notebooklm-skill).
 
 <div align="center">
 
 # NotebookLM Claude Code Skill
 
-**Let [Claude Code](https://github.com/anthropics/claude-code) chat directly with NotebookLM for source-grounded answers based exclusively on your uploaded documents**
+**Let [Claude Code](https://github.com/anthropics/claude-code) ask your Google NotebookLM (now "Gemini Notebook") notebooks questions and get source-grounded, citation-backed answers drawn only from the documents you uploaded.**
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Claude Code Skill](https://img.shields.io/badge/Claude%20Code-Skill-purple.svg)](https://www.anthropic.com/news/skills)
-[![Based on](https://img.shields.io/badge/Based%20on-NotebookLM%20MCP-green.svg)](https://github.com/PleasePrompto/notebooklm-mcp)
-[![GitHub](https://img.shields.io/github/stars/PleasePrompto/notebooklm-skill?style=social)](https://github.com/PleasePrompto/notebooklm-skill)
 
-> Use this skill to query your Google NotebookLM notebooks directly from Claude Code for source-grounded, citation-backed answers from Gemini. Browser automation, library management, persistent auth. Drastically reduced hallucinations - answers only from your uploaded documents.
-
-[Installation](#installation) • [Quick Start](#quick-start) • [Why NotebookLM](#why-notebooklm-not-local-rag) • [How It Works](#how-it-works) • [MCP Alternative](https://github.com/PleasePrompto/notebooklm-mcp)
+[Installation](#installation) • [Quick Start](#quick-start) • [How It Works](#how-it-works) • [Commands](#commands) • [Limitations](#limitations)
 
 </div>
 
 ---
 
-## ⚠️ Important: Local Claude Code Only
+## NotebookLM is now Gemini Notebook
 
-**This skill works ONLY with local [Claude Code](https://github.com/anthropics/claude-code) installations, NOT in the web UI.**
+Google renamed NotebookLM to **Gemini Notebook** on July 16, 2026 and moved the app to `https://notebook.google.com`. Old `https://notebooklm.google.com/...` links 301-redirect to the new host. The skill accepts both URL forms and stores them as `notebook.google.com` URLs. The skill itself keeps its name, `notebooklm` (invoked as `/notebooklm`).
 
-The web UI runs skills in a sandbox without network access, which this skill requires for browser automation. You must use [Claude Code](https://github.com/anthropics/claude-code) locally on your machine.
+## Local Claude Code only
+
+The skill drives a real Google Chrome window on your machine, so it needs local [Claude Code](https://github.com/anthropics/claude-code) with network access. It does not work in sandboxed environments such as the Claude web UI.
 
 ---
 
-## The Problem
+## What it does
 
-When you tell [Claude Code](https://github.com/anthropics/claude-code) to "search through my local documentation", here's what happens:
-- **Massive token consumption**: Searching through documentation means reading multiple files repeatedly
-- **Inaccurate retrieval**: Searches for keywords, misses context and connections between docs
-- **Hallucinations**: When it can't find something, it invents plausible-sounding APIs
-- **Manual copy-paste**: Switching between NotebookLM browser and your editor constantly
-
-## The Solution
-
-This Claude Code Skill lets [Claude Code](https://github.com/anthropics/claude-code) chat directly with [**NotebookLM**](https://notebooklm.google/) — Google's **source-grounded knowledge base** powered by Gemini 2.5 that provides intelligent, synthesized answers exclusively from your uploaded documents.
+Instead of having Claude read through your documentation file by file (expensive and prone to filling gaps with guesses), you upload the documents to a notebook once and let Claude ask the notebook. Gemini answers only from the notebook's sources and cites them, and Claude uses the answer for the task at hand:
 
 ```
-Your Task → Claude asks NotebookLM → Gemini synthesizes answer → Claude writes correct code
+Your task → Claude asks your notebook → source-grounded answer with citations → Claude continues the task
 ```
 
-**No more copy-paste dance**: Claude asks questions directly and gets answers straight back in the CLI. It builds deep understanding through automatic follow-ups, getting specific implementation details, edge cases, and best practices.
+There is no copy-paste between the browser and the terminal, and no vector database, embeddings or chunking to set up.
 
 ---
 
-## Why NotebookLM, Not Local RAG?
+## Requirements
 
-| Approach | Token Cost | Setup Time | Hallucinations | Answer Quality |
-|----------|------------|------------|----------------|----------------|
-| **Feed docs to Claude** | 🔴 Very high (multiple file reads) | Instant | Yes - fills gaps | Variable retrieval |
-| **Web search** | 🟡 Medium | Instant | High - unreliable sources | Hit or miss |
-| **Local RAG** | 🟡 Medium-High | Hours (embeddings, chunking) | Medium - retrieval gaps | Depends on setup |
-| **NotebookLM Skill** | 🟢 Minimal | 5 minutes | **Minimal** - source-grounded only | Expert synthesis |
-
-### What Makes NotebookLM Superior?
-
-1. **Pre-processed by Gemini**: Upload docs once, get instant expert knowledge
-2. **Natural language Q&A**: Not just retrieval — actual understanding and synthesis
-3. **Multi-source correlation**: Connects information across 50+ documents
-4. **Citation-backed**: Every answer includes source references
-5. **No infrastructure**: No vector DBs, embeddings, or chunking strategies needed
-
----
+- macOS, Linux or Windows with **Google Chrome** installed (real Chrome, driven via Patchright's `channel="chrome"`)
+- Python 3.10+ (used only to create the skill's own `.venv`)
+- A Google account with access to the notebooks you want to query
 
 ## Installation
 
-### The simplest installation ever:
-
 ```bash
-# 1. Create skills directory (if it doesn't exist)
 mkdir -p ~/.claude/skills
+git clone https://github.com/blandersen/notebooklm-skill ~/.claude/skills/notebooklm
 
-# 2. Clone this repository
-cd ~/.claude/skills
-git clone https://github.com/PleasePrompto/notebooklm-skill notebooklm
-
-# 3. That's it! Open Claude Code and say:
-"What are my skills?"
+# Create the skill's .venv and install its pinned dependencies into it
+python3 ~/.claude/skills/notebooklm/scripts/run.py setup_environment.py
 ```
 
-When you first use the skill, it automatically:
-- Creates an isolated Python environment (`.venv`)
-- Installs all dependencies including **Google Chrome**
-- Sets up browser automation with Chrome (not Chromium) for maximum reliability
-- Everything stays contained in the skill folder
+`setup_environment.py`:
+- creates `~/.claude/skills/notebooklm/.venv` and pip-installs `requirements.txt` there (`patchright==1.63.0`, `python-dotenv==1.2.4`); no other Python environment is touched
+- uses your existing Google Chrome, and only runs `patchright install chrome` if Chrome is not found
+- writes a hash of `requirements.txt` to `.venv/.requirements.sha256` so `run.py` can detect an outdated venv
 
-**Note:** The setup uses real Chrome instead of Chromium for cross-platform reliability, consistent browser fingerprinting, and better anti-detection with Google services
+Options: `--check` (report status only), `--recreate` (delete and rebuild `.venv`, e.g. after the base Python was removed or upgraded).
+
+`run.py` never installs anything itself. If `.venv` is missing, broken or out of date it exits with code 3 and prints the setup command; when Claude sees that, it asks you before running setup.
 
 ---
 
 ## Quick Start
 
-### 1. Check your skills
+1. **Authenticate (one-time).** In Claude Code say *"Set up NotebookLM authentication"*. A Chrome window opens; sign in to Google. The skill waits up to 10 minutes.
+2. **Create a notebook** at [notebook.google.com](https://notebook.google.com) and add your sources (PDFs, Google Docs, websites, YouTube videos, ...). Sources can only be added in the web UI.
+3. **Add it to the library.** *"Add this notebook to my library: <link>"*. If you don't give a description, Claude asks the notebook what it contains and uses that.
+4. **Ask.** *"What does my React notebook say about hooks?"*
 
-Say in Claude Code:
-```
-"What skills do I have?"
-```
-
-Claude will list your available skills including NotebookLM.
-
-### 2. Authenticate with Google (one-time)
-
-```
-"Set up NotebookLM authentication"
-```
-*A Chrome window opens → log in with your Google account*
-
-### 3. Create your knowledge base
-
-Go to [notebooklm.google.com](https://notebooklm.google.com) → Create notebook → Upload your docs:
-- 📄 PDFs, Google Docs, markdown files
-- 🔗 Websites, GitHub repos
-- 🎥 YouTube videos
-- 📚 Multiple sources per notebook
-
-Share: **⚙️ Share → Anyone with link → Copy**
-
-### 4. Add to your library
-
-**Option A: Let Claude figure it out (Smart Add)**
-```
-"Query this notebook about its content and add it to my library: [your-link]"
-```
-Claude will automatically query the notebook to discover its content, then add it with appropriate metadata.
-
-**Option B: Manual add**
-```
-"Add this NotebookLM to my library: [your-link]"
-```
-Claude will ask for a name and topics, then save it for future use.
-
-### 5. Start researching
-
-```
-"What does my React docs say about hooks?"
-```
-
-Claude automatically selects the right notebook and gets the answer directly from NotebookLM.
+Notebooks in the signed-in account work as-is. Notebooks owned by someone else must be shared with that account (or with anyone who has the link).
 
 ---
 
 ## How It Works
 
-This is a **Claude Code Skill** - a local folder containing instructions and scripts that Claude Code can use when needed. Unlike the [MCP server version](https://github.com/PleasePrompto/notebooklm-mcp), this runs directly in Claude Code without needing a separate server.
+Each question is one script run:
 
-### Key Differences from MCP Server
+1. `run.py` checks the skill's `.venv` and runs `ask_question.py` with it.
+2. Chrome starts headless on the skill's persistent profile, and saved Google cookies are injected (see [AUTHENTICATION.md](AUTHENTICATION.md)).
+3. The notebook opens, any "what's new" promo dialog is dismissed, the question is typed into the chat box and submitted.
+4. The script waits for the answer that belongs to this question, strips the collapsible "Thoughts" panel, renders inline citations as `[n]`, and prints it.
+5. Refreshed Google cookies are saved and the browser closes.
 
-| Feature | This Skill | MCP Server |
-|---------|------------|------------|
-| **Protocol** | Claude Skills | Model Context Protocol |
-| **Installation** | Clone to `~/.claude/skills` | `claude mcp add ...` |
-| **Sessions** | Fresh browser each question | Persistent chat sessions |
-| **Compatibility** | Claude Code only (local) | Claude Code, Codex, Cursor, etc. |
-| **Language** | Python | TypeScript |
-| **Distribution** | Git clone | npm package |
+A query takes roughly 20-25 seconds, mostly browser startup and answer generation.
 
-### Architecture
+**Chat history.** Every question the skill asks is saved to that notebook's chat history in your account and is visible in the web UI. The skill does not clear it. It picks out its own answer by matching the latest message pair against the question it just asked, so older history is never returned. Whether Gemini uses earlier turns as context is not guaranteed, so follow-up questions are written to be self-contained.
+
+**Follow-ups.** Each answer ends with a short `[Note to assistant: ...]` line. Claude asks at most two self-contained follow-ups when an answer leaves a real gap, then synthesizes the result for you.
+
+**Failure snapshots.** If the chat input or an answer can't be found, a screenshot and HTML dump are written to `data/debug/`. UI selectors live in `scripts/config.py`.
+
+### Layout
 
 ```
 ~/.claude/skills/notebooklm/
-├── SKILL.md              # Instructions for Claude
-├── scripts/              # Python automation scripts
-│   ├── ask_question.py   # Query NotebookLM
-│   ├── notebook_manager.py # Library management
-│   └── auth_manager.py   # Google authentication
-├── .venv/                # Isolated Python environment (auto-created)
-└── data/                 # Local notebook library
+├── SKILL.md                  # Instructions Claude reads
+├── scripts/
+│   ├── run.py                # Wrapper: runs a script with the skill's .venv (never installs)
+│   ├── setup_environment.py  # Creates/updates .venv (the only script that installs)
+│   ├── ask_question.py       # Ask one question
+│   ├── notebook_manager.py   # Notebook library
+│   ├── auth_manager.py       # Google login and session checks
+│   ├── cleanup_manager.py    # Delete skill data
+│   ├── browser_utils.py      # Chrome launch, cookie injection, typing
+│   └── config.py             # URLs, selectors, timeouts, .env loading
+├── .venv/                    # Created by setup_environment.py
+└── data/                     # Library, auth state, debug snapshots (git-ignored)
 ```
-
-When you mention NotebookLM or send a notebook URL, Claude:
-1. Loads the skill instructions
-2. Runs the appropriate Python script
-3. Opens a browser, asks your question
-4. Returns the answer directly to you
-5. Uses that knowledge to help with your task
 
 ---
 
-## Core Features
+## Commands
 
-### **Source-Grounded Responses**
-NotebookLM significantly reduces hallucinations by answering exclusively from your uploaded documents. If information isn't available, it indicates uncertainty rather than inventing content.
+You normally talk to Claude in plain language (*"Show my notebooks"*, *"Use the React notebook"*, *"Reset NotebookLM authentication"*). The underlying commands, runnable from any directory:
 
-### **Direct Integration**
-No copy-paste between browser and editor. Claude asks and receives answers programmatically.
+```bash
+S=~/.claude/skills/notebooklm/scripts/run.py
 
-### **Smart Library Management**
-Save NotebookLM links with tags and descriptions. Claude auto-selects the right notebook for your task.
+# Ask (active notebook unless --notebook-id / --notebook-url is given)
+python3 $S ask_question.py --question "..." [--notebook-id ID | --notebook-url URL] [--show-browser]
 
-### **Automatic Authentication**
-One-time Google login, then authentication persists across sessions.
+# Authentication
+python3 $S auth_manager.py status     # offline: is a non-expired Google session cookie saved?
+python3 $S auth_manager.py validate   # live headless check; also refreshes saved cookies
+python3 $S auth_manager.py setup      # visible Chrome, sign in (waits up to 10 min, --timeout MIN)
+python3 $S auth_manager.py reauth     # clear browser state, then setup
+python3 $S auth_manager.py clear      # delete saved auth
 
-### **Self-Contained**
-Everything runs in the skill folder with an isolated Python environment. No global installations.
+# Library
+python3 $S notebook_manager.py add --url URL --name NAME --description DESC --topics "t1,t2" [--use-cases "..."] [--tags "..."]
+python3 $S notebook_manager.py list
+python3 $S notebook_manager.py search --query Q
+python3 $S notebook_manager.py activate --id ID
+python3 $S notebook_manager.py remove --id ID
+python3 $S notebook_manager.py stats
 
-### **Human-Like Automation**
-Uses realistic typing speeds and interaction patterns to avoid detection.
+# Cleanup (preview by default)
+python3 $S cleanup_manager.py [--confirm] [--preserve-library] [--force]
+```
+
+`ask_question.py` exit codes: `0` answer printed, `1` failure, `2` not authenticated or session expired (run `auth_manager.py reauth`), `3` environment not ready (from `run.py`).
+
+Library IDs are shell-safe slugs generated from the name (`a-z0-9-`). IDs from older versions (which could contain `:` or `&`) are migrated automatically and still resolve. Adding a URL that is already in the library is rejected.
 
 ---
 
-## Common Commands
+## Configuration
 
-| What you say | What happens |
-|--------------|--------------|
-| *"Set up NotebookLM authentication"* | Opens Chrome for Google login |
-| *"Add [link] to my NotebookLM library"* | Saves notebook with metadata |
-| *"Show my NotebookLM notebooks"* | Lists all saved notebooks |
-| *"Ask my API docs about [topic]"* | Queries the relevant notebook |
-| *"Use the React notebook"* | Sets active notebook |
-| *"Clear NotebookLM data"* | Fresh start (keeps library) |
+Optional `~/.claude/skills/notebooklm/.env` (real environment variables take precedence):
 
----
-
-## Real-World Examples
-
-### Example 1: Workshop Manual Query
-
-**User asks**: "Check my Suzuki GSR 600 workshop manual for brake fluid type, engine oil specs, and rear axle torque."
-
-**Claude automatically**:
-- Authenticates with NotebookLM
-- Asks comprehensive questions about each specification
-- Follows up when prompted "Is that ALL you need to know?"
-- Provides accurate specifications: DOT 4 brake fluid, SAE 10W-40 oil, 100 N·m rear axle torque
-
-![NotebookLM Chat Example](images/example_notebookchat.png)
-
-### Example 2: Building Without Hallucinations
-
-**You**: "I need to build an n8n workflow for Gmail spam filtering. Use my n8n notebook."
-
-**Claude's internal process:**
-```
-→ Loads NotebookLM skill
-→ Activates n8n notebook
-→ Asks comprehensive questions with follow-ups
-→ Synthesizes complete answer from multiple queries
+```env
+HEADLESS=true              # false = always show the browser (per call: --show-browser)
+QUERY_TIMEOUT_SECONDS=180  # max wait for an answer
+TYPING_DELAY_MS_MIN=15     # per-character typing delay
+TYPING_DELAY_MS_MAX=45
+DEFAULT_NOTEBOOK_ID=       # used when no --notebook-id/--notebook-url is given (before the active notebook)
 ```
 
-**Result**: Working workflow on first try, no debugging hallucinated APIs.
+## Data
 
----
-
-## Technical Details
-
-### Core Technology
-- **Patchright**: Browser automation library (Playwright-based)
-- **Python**: Implementation language for this skill
-- **Stealth techniques**: Human-like typing and interaction patterns
-
-Note: The MCP server uses the same Patchright library but via TypeScript/npm ecosystem.
-
-### Dependencies
-- **patchright==1.55.2**: Browser automation
-- **python-dotenv==1.0.0**: Environment configuration
-- Automatically installed in `.venv` on first use
-
-### Data Storage
-
-All data is stored locally within the skill directory:
+Everything is stored in `~/.claude/skills/notebooklm/data/`, which is git-ignored. Never commit or share it.
 
 ```
-~/.claude/skills/notebooklm/data/
-├── library.json       - Your notebook library with metadata
-├── auth_info.json     - Authentication status info
-└── browser_state/     - Browser cookies and session data
+data/
+├── library.json          # Notebook library
+├── auth_info.json        # Time of last successful login
+├── browser_state/
+│   ├── state.json        # Saved cookies (injected on every launch)
+│   └── browser_profile/  # Chrome profile
+└── debug/                # Screenshots + HTML from failed queries
 ```
-
-**Important Security Note:**
-- The `data/` directory contains sensitive authentication data and personal notebooks
-- It's automatically excluded from git via `.gitignore`
-- NEVER manually commit or share the contents of the `data/` directory
-
-### Session Model
-
-Unlike the MCP server, this skill uses a **stateless model**:
-- Each question opens a fresh browser
-- Asks the question, gets the answer
-- Adds a follow-up prompt to encourage Claude to ask more questions
-- Closes the browser immediately
-
-This means:
-- No persistent chat context
-- Each question is independent
-- But your notebook library persists
-- **Follow-up mechanism**: Each answer includes "Is that ALL you need to know?" to prompt Claude to ask comprehensive follow-ups
-
-For multi-step research, Claude automatically asks follow-up questions when needed.
 
 ---
 
 ## Limitations
 
-### Skill-Specific
-- **Local Claude Code only** - Does not work in web UI (sandbox restrictions)
-- **No session persistence** - Each question is independent
-- **No follow-up context** - Can't reference "the previous answer"
+- **UI automation.** There is no official consumer API, so the skill drives the web UI. Google UI changes can break the selectors in `scripts/config.py`; `data/debug/` snapshots help update them.
+- **One question per browser session**, about 20-25 s each. Queries share one Chrome profile, so run them one at a time.
+- **Quotas** depend on your Google plan (the paid tiers were reshuffled in 2026). Check your plan's chat limits.
+- **Sources** must be added in the web UI.
+- **Chat history** in the notebook grows with every question the skill asks.
 
-### NotebookLM
-- **Rate limits** - Free tier has daily query limits
-- **Manual upload** - You must upload docs to NotebookLM first
-- **Share requirement** - Notebooks must be shared publicly
+## Alternatives
 
----
-
-## FAQ
-
-**Why doesn't this work in the Claude web UI?**
-The web UI runs skills in a sandbox without network access. Browser automation requires network access to reach NotebookLM.
-
-**How is this different from the MCP server?**
-This is a simpler, Python-based implementation that runs directly as a Claude Skill. The MCP server is more feature-rich with persistent sessions and works with multiple tools (Codex, Cursor, etc.).
-
-**Can I use both this skill and the MCP server?**
-Yes! They serve different purposes. Use the skill for quick Claude Code integration, use the MCP server for persistent sessions and multi-tool support.
-
-**What if Chrome crashes?**
-Run: `"Clear NotebookLM browser data"` and try again.
-
-**Is my Google account secure?**
-Chrome runs locally on your machine. Your credentials never leave your computer. Use a dedicated Google account if you're concerned.
+- [teng-lin/notebooklm-py](https://github.com/teng-lin/notebooklm-py): unofficial Python client that calls Google's internal `batchexecute` RPC instead of automating the page. Faster, but depends on an undocumented API.
+- [PleasePrompto/notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp): the original author's MCP server version (TypeScript), usable from other MCP clients.
+- The official Gemini Notebook Enterprise API is only available to Google Cloud enterprise customers and covers notebook management, not consumer chat.
 
 ---
 
 ## Troubleshooting
 
-### Skill not found
-```bash
-# Make sure it's in the right location
-ls ~/.claude/skills/notebooklm/
-# Should show: SKILL.md, scripts/, etc.
-```
+| Problem | Fix |
+|---------|-----|
+| Skill not found | `ls ~/.claude/skills/notebooklm/SKILL.md` |
+| Exit 3 / "Environment not ready" | `python3 ~/.claude/skills/notebooklm/scripts/run.py setup_environment.py` (`--recreate` if the venv's base Python is gone) |
+| Exit 2 / not authenticated | `python3 ~/.claude/skills/notebooklm/scripts/run.py auth_manager.py reauth` |
+| "Could not find the chat input" / "No answer" | Inspect `data/debug/`, or rerun with `--show-browser` |
+| Corrupted browser profile | `cleanup_manager.py --confirm --preserve-library`, then `auth_manager.py setup` |
 
-### Authentication issues
-Say: `"Reset NotebookLM authentication"`
-
-### Browser crashes
-Say: `"Clear NotebookLM browser data"`
-
-### Dependencies issues
-```bash
-# Manual reinstall if needed
-cd ~/.claude/skills/notebooklm
-rm -rf .venv
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -r requirements.txt
-```
+More in [references/troubleshooting.md](references/troubleshooting.md).
 
 ---
 
 ## Disclaimer
 
-This tool automates browser interactions with NotebookLM to make your workflow more efficient. However, a few friendly reminders:
+This tool automates a Google web app. It uses real Chrome with Patchright's recommended settings and human-like typing delays, but Google may still detect or restrict automated use. Consider using a dedicated Google account. Your credentials are entered by you in a local Chrome window and never handled by the skill; the saved cookies in `data/` grant access to your account, so keep that directory private.
 
-**About browser automation:**
-While I've built in humanization features (realistic typing speeds, natural delays, mouse movements) to make the automation behave more naturally, I can't guarantee Google won't detect or flag automated usage. I recommend using a dedicated Google account for automation rather than your primary account—think of it like web scraping: probably fine, but better safe than sorry!
-
-**About CLI tools and AI agents:**
-CLI tools like Claude Code, Codex, and similar AI-powered assistants are incredibly powerful, but they can make mistakes. Please use them with care and awareness:
-- Always review changes before committing or deploying
-- Test in safe environments first
-- Keep backups of important work
-- Remember: AI agents are assistants, not infallible oracles
-
-I built this tool for myself because I was tired of the copy-paste dance between NotebookLM and my editor. I'm sharing it in the hope it helps others too, but I can't take responsibility for any issues, data loss, or account problems that might occur. Use at your own discretion and judgment.
-
-That said, if you run into problems or have questions, feel free to open an issue on GitHub. I'm happy to help troubleshoot!
+AI coding agents make mistakes. Review what they do before relying on it.
 
 ---
 
-## Credits
+## Credits and license
 
-This skill is inspired by my [**NotebookLM MCP Server**](https://github.com/PleasePrompto/notebooklm-mcp) and provides an alternative implementation as a Claude Code Skill:
-- Both use Patchright for browser automation (TypeScript for MCP, Python for Skill)
-- Skill version runs directly in Claude Code without MCP protocol
-- Stateless design optimized for skill architecture
-
-If you need:
-- **Persistent sessions** → Use the [MCP Server](https://github.com/PleasePrompto/notebooklm-mcp)
-- **Multiple tool support** (Codex, Cursor) → Use the [MCP Server](https://github.com/PleasePrompto/notebooklm-mcp)
-- **Quick Claude Code integration** → Use this skill
-
----
-
-## The Bottom Line
-
-**Without this skill**: NotebookLM in browser → Copy answer → Paste in Claude → Copy next question → Back to browser...
-
-**With this skill**: Claude researches directly → Gets answers instantly → Writes correct code
-
-Stop the copy-paste dance. Start getting accurate, grounded answers directly in Claude Code.
-
-```bash
-# Get started in 30 seconds
-cd ~/.claude/skills
-git clone https://github.com/PleasePrompto/notebooklm-skill notebooklm
-# Open Claude Code: "What are my skills?"
-```
-
----
-
-<div align="center">
-
-Built as a Claude Code Skill adaptation of my [NotebookLM MCP Server](https://github.com/PleasePrompto/notebooklm-mcp)
-
-For source-grounded, document-based research directly in Claude Code
-
-</div>
+Originally created by [PleasePrompto](https://github.com/PleasePrompto) as a Claude Code adaptation of the [NotebookLM MCP Server](https://github.com/PleasePrompto/notebooklm-mcp). This fork is maintained at [blandersen/notebooklm-skill](https://github.com/blandersen/notebooklm-skill). MIT License, see [LICENSE](LICENSE).

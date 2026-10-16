@@ -1,10 +1,9 @@
 # NotebookLM Skill Dependencies
-# These will be installed in the skill's local .venv
+# Installed only into the skill's local .venv by: python3 ~/.claude/skills/notebooklm/scripts/run.py setup_environment.py
+# Uses the system Google Chrome (channel="chrome"); setup installs it only if missing.
 
-# Core browser automation with anti-detection
-# Note: After installation, run: patchright install chrome
-# (Chrome is required, not Chromium, for cross-platform reliability)
-patchright==1.55.2
+# Undetected Playwright fork for browser automation
+patchright==1.63.0
 
-# Environment management
-python-dotenv==1.0.0
+# Optional .env configuration
+python-dotenv==1.2.4
